@@ -143,7 +143,7 @@ impl<T> Clone for Signal<T> {
 impl<T> Copy for Signal<T> {}
 
 /// [`Signal`] 内部储存的变量。
-type RawSignal = Box<dyn Any>;
+type RawSignal = Rc<RefCell<dyn Any>>;
 
 #[derive(Default)]
 struct SignalContext {
@@ -156,16 +156,19 @@ struct SignalContext {
 impl<T> Signal<T> {
     /// 读取此 [`Signal`] 的引用，且不跟踪其存在的 [`Effect`]。
     pub fn read_untracked<U>(&self, f: impl FnOnce(&T) -> U) -> U {
-        RT.with(|rt| {
-            f(rt.signals
+        let raw = RT.with(|rt| {
+            rt.signals
                 .borrow()
                 .get(self.id)
                 .unwrap_or_else(|| panic!("试图读取一个已经被释放的 Signal"))
-                .downcast_ref::<T>()
-                // 每个线程对应一个独立的运行时，如果一个 Signal 被发送到了其它线程，
-                // 其 ID 对应的内存单元可能与当前记录的类型不匹配。
-                .unwrap_or_else(|| panic!("Signal 类型不匹配")))
-        })
+                .clone()
+        });
+        let raw = raw.borrow();
+        f(raw
+            .downcast_ref::<T>()
+            // 每个线程对应一个独立的运行时，如果一个 Signal 被发送到了其它线程，
+            // 其 ID 对应的内存单元可能与当前记录的类型不匹配。
+            .unwrap_or_else(|| panic!("Signal 类型不匹配")))
     }
 
     /// 读取此 [`Signal`] 的引用。
@@ -203,15 +206,17 @@ impl<T> Signal<T> {
 
     /// 写入此 [`Signal`] 的可变引用，且不触发受其影响的 [`Effect`]。
     pub fn write_slient(&self, f: impl FnOnce(&mut T)) {
-        RT.with(|rt| {
-            let mut signals = rt.signals.borrow_mut();
-            let t = signals
-                .get_mut(self.id)
+        let raw = RT.with(|rt| {
+            rt.signals
+                .borrow()
+                .get(self.id)
                 .unwrap_or_else(|| panic!("试图写入一个已经被释放的 Signal"))
-                .downcast_mut::<T>()
-                .unwrap_or_else(|| panic!("Signal 类型不匹配"));
-            f(t);
+                .clone()
         });
+        let mut raw = raw.borrow_mut();
+        f(raw
+            .downcast_mut::<T>()
+            .unwrap_or_else(|| panic!("Signal 类型不匹配")));
     }
 
     /// 写入此 [`Signal`] 的可变引用。
@@ -408,7 +413,7 @@ impl Scope {
     /// 创建一个 [`Signal`].
     pub fn create_signal<T>(&self, init: T) -> Signal<T> {
         let id = RT.with(|rt| {
-            let id = rt.signals.borrow_mut().insert(Box::new(init));
+            let id = rt.signals.borrow_mut().insert(Rc::new(RefCell::new(init)));
             rt.signal_contexts
                 .borrow_mut()
                 .insert(id, Default::default());
@@ -499,15 +504,15 @@ impl Scope {
     }
 
     /// 创建一个 [`Signal`]，在 `f` 的返回值改变时随之更新。
-    pub fn create_seletor<T>(&self, f: impl 'static + FnMut() -> T) -> Signal<T>
+    pub fn create_selector<T>(&self, f: impl 'static + FnMut() -> T) -> Signal<T>
     where
         T: PartialEq,
     {
-        self.create_seletor_with(f, T::eq)
+        self.create_selector_with(f, T::eq)
     }
 
     /// 创建一个 [`Signal`]，在 `f` 的返回值改变时随之更新，用 `is_equal` 对新旧值作比较。
-    pub fn create_seletor_with<T>(
+    pub fn create_selector_with<T>(
         &self,
         f: impl 'static + FnMut() -> T,
         mut is_equal: impl 'static + FnMut(&T, &T) -> bool,
