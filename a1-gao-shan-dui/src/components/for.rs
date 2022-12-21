@@ -174,20 +174,39 @@ fn reconcile<N, K>(
     N: GenericNode,
     K: Clone + Eq + Hash,
 {
+    let a_len = a.len();
+    let b_len = b.len();
+    // 当 a、b 交集为空时，a 中视图会被全部移除，因此需要提前记录其下一个兄弟节点
+    let a_next = a.last().unwrap().v.next_sibling();
+
     let mut a_start = 0;
-    let mut a_end = a.len();
     let mut b_start = 0;
-    let mut b_end = b.len();
+    let mut a_end = a_len;
+    let mut b_end = b_len;
     let mut b_map = None::<HashMap<K, usize>>;
 
     while a_start < a_end || b_start < b_end {
         if a_start == a_end {
             // 插入新增的视图
-            let first = a.get(a_start).or_else(|| a.last()).unwrap().v.first();
+            let position = if b_end < b_len {
+                if b_start == 0 {
+                    // a: 4
+                    // b: 1 2 3 4
+                    Some(b[b_end].v.first())
+                } else {
+                    // a: 1 4
+                    // b: 1 2 3 4
+                    b[b_start].v.next_sibling()
+                }
+            } else {
+                // a: 1 2 3 4
+                // b: 5 6 7 8
+                a_next
+            };
             for Pair { v, .. } in b[b_start..b_end].iter() {
-                parent.insert_before(v, Some(&first));
-                b_start += 1;
+                parent.insert_before(v, position.as_ref());
             }
+            b_start = b_end;
             break;
         } else if b_start == b_end {
             // 移除多余的视图
@@ -196,8 +215,8 @@ fn reconcile<N, K>(
                     parent.remove_child(v);
                     cached_views.remove(k);
                 }
-                a_start += 1;
             }
+            a_start = a_end;
             break;
         }
 
@@ -234,9 +253,9 @@ fn reconcile<N, K>(
             if let Some(&index) = map.get(&a_start_kv.k) {
                 if index > b_start && index < b_end {
                     // 插入中间新增的视图
-                    let first = a_start_kv.v.first();
+                    let position = a_start_kv.v.first();
                     for Pair { v, .. } in b[b_start..index].iter() {
-                        parent.insert_before(v, Some(&first));
+                        parent.insert_before(v, Some(&position));
                         b_start += 1;
                     }
                 } else {
