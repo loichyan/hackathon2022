@@ -40,7 +40,7 @@ pub use {
     element::{GenericElement, NodeRef},
     elements::{IntoEventHandler, IntoReactive, Reactive, Reactive::Value},
     node::{mount_to, mount_to_body, DomNode, EventHandler, GenericNode, NodeType, Property},
-    reactive::{create_root, untrack, Effect, Scope, ScopeDisposer, Signal},
+    reactive::{create_root, untrack, Effect, Lazy, Scope, ScopeDisposer, Signal},
     view::View,
     web_sys::Event,
 };

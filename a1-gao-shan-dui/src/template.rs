@@ -16,8 +16,8 @@ pub struct Template<N: GenericNode> {
     /// 初始化阶段执行，返回需要被模板记录的 [`View`]，且每次调用返回的 [`View`]
     /// 结构保持一致。
     pub init: Box<dyn FnOnce() -> View<N>>,
-    /// 渲染阶段执行，接受 [`RenderParent`] 以及初始化后的首个节点作为参数，返回渲染后的
-    /// [`View`] 及其之后的第一个兄弟节点。组件需要保证在渲染执行前遵守 [`RenderParent`]
+    /// 渲染阶段执行，接受 [`BeforeRendering`] 以及初始化后的首个节点作为参数，返回渲染后的
+    /// [`View`] 及其之后的第一个兄弟节点。组件需要保证在渲染执行前遵守 [`BeforeRendering`]
     /// 定义的行为。
     pub render: Box<dyn FnOnce(BeforeRendering<N>, N) -> RenderOutput<N>>,
     // 对于 `init` 和 `render` 我们可以使用静态分发而非动态分发来换取更高的性能，

@@ -154,6 +154,26 @@ struct SignalContext {
 }
 
 impl<T> Signal<T> {
+    /// 读取此 [`Signal`] 的引用，且不跟踪其存在的 [`Effect`]。
+    pub fn read_untracked<U>(&self, f: impl FnOnce(&T) -> U) -> U {
+        RT.with(|rt| {
+            f(rt.signals
+                .borrow()
+                .get(self.id)
+                .unwrap_or_else(|| panic!("试图读取一个已经被释放的 Signal"))
+                .downcast_ref::<T>()
+                // 每个线程对应一个独立的运行时，如果一个 Signal 被发送到了其它线程，
+                // 其 ID 对应的内存单元可能与当前记录的类型不匹配。
+                .unwrap_or_else(|| panic!("Signal 类型不匹配")))
+        })
+    }
+
+    /// 读取此 [`Signal`] 的引用。
+    pub fn read<U>(&self, f: impl FnOnce(&T) -> U) -> U {
+        self.track();
+        self.read_untracked(f)
+    }
+
     /// 读取此 [`Signal`] 储存的变量，并追踪其所在的 [`Effect`]，即如果在一个
     /// [`Effect`] 中执行，则下一次写入会触发该 [`Effect`]。
     pub fn get(&self) -> T
@@ -161,21 +181,12 @@ impl<T> Signal<T> {
         T: Clone,
     {
         self.track();
-        RT.with(|rt| {
-            rt.signals
-                .borrow()
-                .get(self.id)
-                .unwrap_or_else(|| panic!("试图读取一个已经被释放的 Signal"))
-                .downcast_ref::<T>()
-                // 每个线程对应一个独立的运行时，如果一个 Signal 被发送到了其它线程，
-                // 其 ID 对应的内存单元可能与当前记录的类型不匹配。
-                .unwrap_or_else(|| panic!("Signal 类型不匹配"))
-                .clone()
-        })
+        self.read_untracked(Clone::clone)
     }
 
-    /// 通知当前 [`Runtime::observer`] 来依赖此 [`Signal`]。
-    fn track(&self) {
+    /// 如果此方法在某个 [`Effect`] 执行时被调用，那么该 [`Effect`] 将会跟踪此 [`Signal`]
+    /// 的下一次写入。
+    pub fn track(&self) {
         RT.with(|rt| {
             if let Some(id) = rt.observer.get() {
                 // 在这里我们通知 Effect 来依赖自己，而不是主动去订阅 Effect，如果
@@ -187,10 +198,11 @@ impl<T> Signal<T> {
                     .depenencies
                     .insert(self.id);
             }
-        })
+        });
     }
 
-    fn write<U>(&self, f: impl FnOnce(&mut T) -> U) -> U {
+    /// 写入此 [`Signal`] 的可变引用，且不触发受其影响的 [`Effect`]。
+    pub fn write_slient(&self, f: impl FnOnce(&mut T)) {
         RT.with(|rt| {
             let mut signals = rt.signals.borrow_mut();
             let t = signals
@@ -198,8 +210,14 @@ impl<T> Signal<T> {
                 .unwrap_or_else(|| panic!("试图写入一个已经被释放的 Signal"))
                 .downcast_mut::<T>()
                 .unwrap_or_else(|| panic!("Signal 类型不匹配"));
-            f(t)
-        })
+            f(t);
+        });
+    }
+
+    /// 写入此 [`Signal`] 的可变引用。
+    pub fn write(&self, f: impl FnOnce(&mut T)) {
+        self.write_slient(f);
+        self.trigger();
     }
 
     /// 检查两个 [`Signal`] 的引用是否相等。
@@ -209,7 +227,7 @@ impl<T> Signal<T> {
 
     /// 写入此 [`Signal`]，并触发受其影响的 [`Effect`]。
     pub fn set(&self, val: T) {
-        self.write(|t| *t = val);
+        self.write_slient(|t| *t = val);
         self.trigger();
     }
 
@@ -220,7 +238,7 @@ impl<T> Signal<T> {
     }
 
     /// 触发受此 [`Signal`] 影响的全部 [`Effect`]。
-    fn trigger(&self) {
+    pub fn trigger(&self) {
         RT.with(|rt| {
             let subscribers = {
                 // 在一个独立的代码块中可变借用，防止运行 Effect 时 rt.signal_contexts
@@ -432,27 +450,6 @@ impl Scope {
         });
     }
 
-    /// 创建一个 [`Signal`]，其跟踪 `f` 的返回值，每当其返回新值时，该 [`Signal`]
-    /// 会随之更新。
-    pub fn create_memo<T>(&self, mut f: impl 'static + FnMut() -> T) -> Signal<T> {
-        let memo = Rc::new(Cell::new(None::<Signal<T>>));
-        let cx = *self;
-        cx.create_effect({
-            let memo = memo.clone();
-            move || {
-                let new_val = f();
-                if let Some(signal) = memo.get() {
-                    signal.set(new_val);
-                } else {
-                    let signal = cx.create_signal(new_val);
-                    memo.set(Some(signal));
-                }
-            }
-        });
-        // memo 应该随 Effect 执行而有了初值
-        memo.get().unwrap()
-    }
-
     /// 创建一个 [`Lazy`]，与 [`create_memo`] 类似，不过它仅在被读取时计算新值。
     ///
     /// [`create_memo`]: Scope::create_memo
@@ -470,6 +467,63 @@ impl Scope {
             untrack(|| value.set(Some(compute(input.get()))));
         });
         Lazy { value, updater }
+    }
+
+    fn create_memo_impl<T>(
+        &self,
+        mut f: impl 'static + FnMut() -> T,
+        mut update: impl 'static + FnMut(T, Signal<T>),
+    ) -> Signal<T> {
+        let memo = Rc::new(Cell::new(None::<Signal<T>>));
+        let cx = *self;
+        self.create_effect({
+            let memo = memo.clone();
+            move || {
+                let new_val = f();
+                if let Some(signal) = memo.get() {
+                    update(new_val, signal);
+                } else {
+                    let signal = cx.create_signal(new_val);
+                    memo.set(Some(signal));
+                }
+            }
+        });
+        // memo 应该随 Effect 执行而有了初值
+        memo.get().unwrap()
+    }
+
+    /// 创建一个 [`Signal`]，其跟踪 `f` 的返回值，每当其返回新值时，该 [`Signal`]
+    /// 会随之更新。
+    pub fn create_memo<T>(&self, f: impl 'static + FnMut() -> T) -> Signal<T> {
+        self.create_memo_impl(f, |new_val, memo| memo.set(new_val))
+    }
+
+    /// 创建一个 [`Signal`]，在 `f` 的返回值改变时随之更新。
+    pub fn create_seletor<T>(&self, f: impl 'static + FnMut() -> T) -> Signal<T>
+    where
+        T: PartialEq,
+    {
+        self.create_seletor_with(f, T::eq)
+    }
+
+    /// 创建一个 [`Signal`]，在 `f` 的返回值改变时随之更新，用 `is_equal` 对新旧值作比较。
+    pub fn create_seletor_with<T>(
+        &self,
+        f: impl 'static + FnMut() -> T,
+        mut is_equal: impl 'static + FnMut(&T, &T) -> bool,
+    ) -> Signal<T> {
+        self.create_memo_impl(f, move |new_val, memo| {
+            let mut updated = false;
+            memo.write_slient(|old_val| {
+                if !is_equal(old_val, &new_val) {
+                    *old_val = new_val;
+                    updated = true;
+                }
+            });
+            if updated {
+                memo.trigger();
+            }
+        })
     }
 }
 
