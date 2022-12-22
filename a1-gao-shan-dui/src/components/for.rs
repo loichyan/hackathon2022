@@ -1,6 +1,6 @@
 use crate::{
     untrack, utils::ViewParentExt, view, DynComponent, GenericComponent, GenericElement,
-    GenericNode, IntoReactive, Reactive, Scope, View,
+    GenericNode, IntoReactive, Reactive, Scope, ScopeDisposer, View,
 };
 use std::{collections::HashMap, hash::Hash};
 
@@ -11,7 +11,7 @@ pub struct For<N: GenericNode, T: 'static, K: 'static> {
     cx: Scope,
     each: Option<Reactive<Vec<T>>>,
     key: Option<Box<dyn Fn(&T) -> K>>,
-    children: Option<Box<dyn Fn(&T) -> DynComponent<N>>>,
+    children: Option<Box<dyn Fn(Scope, &T) -> DynComponent<N>>>,
 }
 
 /// 创建一个 [`struct@For`] 组件。
@@ -71,10 +71,15 @@ where
                         let mut new_fragment = Vec::with_capacity(each.len());
                         for val in each.iter() {
                             let k = fn_key(val);
-                            let Cached { view, moved } =
-                                cached_views.entry(k.clone()).or_insert_with(|| Cached {
-                                    view: fn_view(val).render(),
-                                    moved: false,
+                            let Cached { view, moved, .. } =
+                                cached_views.entry(k.clone()).or_insert_with(|| {
+                                    let (view, _disposer) =
+                                        cx.create_child(|cx| fn_view(cx, val).render());
+                                    Cached {
+                                        view,
+                                        moved: false,
+                                        _disposer,
+                                    }
                                 });
                             if *moved {
                                 // 忽略重复的键值
@@ -143,19 +148,22 @@ where
         self
     }
 
-    pub fn child<C: GenericComponent<N>>(mut self, child: impl 'static + Fn(&T) -> C) -> Self {
+    pub fn child<C: GenericComponent<N>>(
+        mut self,
+        child: impl 'static + Fn(Scope, &T) -> C,
+    ) -> Self {
         if self.children.is_some() {
             panic!("`For` 有且只能有一个 `child`");
         }
-        self.children = Some(Box::new(move |val| child(val).into_dyn_component()));
+        self.children = Some(Box::new(move |cx, val| child(cx, val).into_dyn_component()));
         self
     }
 }
 
-#[derive(Clone)]
 struct Cached<N: GenericNode> {
     view: View<N>,
     moved: bool,
+    _disposer: ScopeDisposer,
 }
 
 #[derive(Clone)]

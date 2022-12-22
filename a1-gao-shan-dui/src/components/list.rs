@@ -1,6 +1,6 @@
 use crate::{
     untrack, utils::ViewParentExt, view, DynComponent, GenericComponent, GenericElement,
-    GenericNode, IntoReactive, Reactive, Scope, View,
+    GenericNode, IntoReactive, Reactive, Scope, ScopeDisposer, View,
 };
 
 define_placeholder!(Placeholder("空 `akun::List` 的占位符"));
@@ -9,7 +9,7 @@ define_placeholder!(Placeholder("空 `akun::List` 的占位符"));
 pub struct List<N: GenericNode, T: 'static> {
     cx: Scope,
     each: Option<Reactive<Vec<T>>>,
-    children: Option<Box<dyn Fn(&T, usize) -> DynComponent<N>>>,
+    children: Option<Box<dyn Fn(Scope, &T) -> DynComponent<N>>>,
 }
 
 /// 创建一个 [`struct@List`] 组件。
@@ -48,7 +48,7 @@ where
             let dyn_view = View::dyn_(cx, placeholder.clone());
             cx.create_effect({
                 let mounted_view = dyn_view.clone();
-                let mut mounted_fragment = Vec::new();
+                let mut mounted_fragment = Vec::<Cached<N>>::new();
                 move || {
                     // 只需要跟踪 `each` 的变化。
                     let each = each.clone().into_value();
@@ -61,9 +61,10 @@ where
                         for val in each.iter() {
                             // 将新增的视图挂载到当前视图之后。
                             if new_len >= mounted_len {
-                                let new_view = fn_view(val, new_len).render();
-                                parent.insert_before(&new_view, next_sibling.as_ref());
-                                mounted_fragment.push(new_view);
+                                let (view, _disposer) =
+                                    cx.create_child(|cx| fn_view(cx, val).render());
+                                parent.insert_before(&view, next_sibling.as_ref());
+                                mounted_fragment.push(Cached { view, _disposer });
                             }
                             new_len += 1;
                         }
@@ -81,14 +82,16 @@ where
                         } else {
                             if new_len < mounted_len {
                                 // 移除多余的视图。
-                                for view in mounted_fragment.drain(new_len..) {
+                                for Cached { view, .. } in mounted_fragment.drain(new_len..) {
                                     parent.remove_child(&view);
                                 }
                             } else if mounted_len == 0 {
                                 // new_len > mounted_len，移除占位符。
                                 parent.remove_child(&placeholder);
                             }
-                            new_view = View::fragment(mounted_fragment.clone());
+                            new_view = View::fragment(
+                                mounted_fragment.iter().map(|t| t.view.clone()).collect(),
+                            );
                         }
                         debug_assert!(new_view.check_mount_order());
                         mounted_view.set(new_view);
@@ -109,12 +112,17 @@ where
 
     pub fn child<C: GenericComponent<N>>(
         mut self,
-        child: impl 'static + Fn(&T, usize) -> C,
+        child: impl 'static + Fn(Scope, &T) -> C,
     ) -> Self {
         if self.children.is_some() {
             panic!("`List` 有且只能有一个 `child`");
         }
-        self.children = Some(Box::new(move |t, i| child(t, i).into_dyn_component()));
+        self.children = Some(Box::new(move |cx, val| child(cx, val).into_dyn_component()));
         self
     }
+}
+
+struct Cached<N: GenericNode> {
+    view: View<N>,
+    _disposer: ScopeDisposer,
 }

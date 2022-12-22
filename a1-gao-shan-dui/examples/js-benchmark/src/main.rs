@@ -173,7 +173,7 @@ impl<N: GenericNode> App<N> {
         };
 
         let add = move || {
-            data.write(move |data| data.append(&mut build_data(cx, 10)));
+            data.write(move |data| data.append(&mut build_data(cx, 1000)));
         };
 
         let update = move || {
@@ -197,7 +197,6 @@ impl<N: GenericNode> App<N> {
             });
         };
 
-        let is_selected = cx.create_selector(move || selected.get());
         view! { cx,
             div {
                 :className("container")
@@ -226,13 +225,14 @@ impl<N: GenericNode> App<N> {
                         *For {
                             .each(data)
                             .key(|data| data.id)
-                            {move |row| {
+                            {move |cx, row| {
                                 let row_id = row.id;
                                 let label = row.label;
+                                let is_selected = cx.create_selector(move || selected.get() == Some(row_id));
                                 let set_selected = move |_| selected.set(Some(row_id));
                                 view! { cx,
                                     tr {
-                                        .toggle_class("danger", move || is_selected.get() == Some(row_id))
+                                        .toggle_class("danger", is_selected)
                                         td { :className("col-md-1") (row_id) }
                                         td { :className("col-md-4") a { @click(set_selected) (label) } }
                                         td {

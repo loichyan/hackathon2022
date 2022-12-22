@@ -77,7 +77,7 @@ fn main() {
                         *For {
                             .each(ids)
                             .key(|v| *v)
-                            {move |&id| view! { cx, fieldset { "ID: " (id.to_string()) } }}
+                            {move |cx, &id| view! { cx, fieldset { "ID: " (id.to_string()) } }}
                         }
                     }
                 }
