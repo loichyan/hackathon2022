@@ -5,7 +5,7 @@ members = ["examples/*"]
 name = "akun"
 version = "0.0.0"
 license = "MIT OR Apache-2.0"
-authors = ["loichyan <loichyan@foxmail.com>"]
+authors = ["Loi Chyan <loichyan@foxmail.com>"]
 edition = "2021"
 
 [dependencies]
